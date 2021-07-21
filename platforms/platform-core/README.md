@@ -4,6 +4,7 @@ The Jovo Core Platform is a standalone [platform integration](../docs/platforms.
 - [Introduction](#introduction)
 - [Getting Started](#getting-started)
 - [Requests and Responses](#requests-and-responses)
+- [Platform-Specific Features](#platform-specific-features)
 
 ## Introduction
 
@@ -52,3 +53,22 @@ const app = new App({
 ## Requests and Responses
 
 // TODO
+
+
+
+
+## Platform-Specific Features
+
+You can access the Core specific object like this:
+
+```typescript
+this.$core
+```
+
+You can also use this object to see if the request is coming from Core (or a different platform):
+
+```typescript
+if(this.$core) {
+  // ...
+}
+```
