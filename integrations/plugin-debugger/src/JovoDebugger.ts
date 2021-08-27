@@ -24,6 +24,7 @@ import { cwd } from 'process';
 import { connect, Socket } from 'socket.io-client';
 import { Writable } from 'stream';
 import { v4 as uuidV4 } from 'uuid';
+import { JovoDebuggerPayload, JovoUpdate } from './interfaces';
 import { MockServer } from './MockServer';
 
 export enum JovoDebuggerEvent {
@@ -40,19 +41,6 @@ export enum JovoDebuggerEvent {
   AppResponse = 'app.response',
 
   AppJovoUpdate = 'app.jovo-update',
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export interface JovoDebuggerPayload<DATA extends any = any> {
-  requestId: number | string;
-  data: DATA;
-}
-
-export interface JovoUpdateData<KEY extends keyof Jovo | string = keyof Jovo | string> {
-  key: KEY;
-  /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-  value: KEY extends keyof Jovo ? Jovo[KEY] : any;
-  path: KEY extends keyof Jovo ? KEY : string;
 }
 
 export interface JovoDebuggerConfig extends PluginConfig {
@@ -76,7 +64,6 @@ export class JovoDebugger extends Plugin<JovoDebuggerConfig> {
     super(config);
   }
 
-  // TODO check default config
   getDefaultConfig(): JovoDebuggerConfig {
     return {
       corePlatform: {},
@@ -140,8 +127,6 @@ export class JovoDebugger extends Plugin<JovoDebuggerConfig> {
     this.patchPlatformsToCreateJovoAsProxy(app.platforms);
   }
 
-  // TODO: maybe find a better solution although this might work well because it is independent of the RIDR-pipeline
-  // -> future changes are less likely to cause breaking changes here
   private patchHandleRequestToIncludeUniqueId() {
     const mount = HandleRequest.prototype.mount;
     HandleRequest.prototype.mount = function () {
@@ -155,33 +140,15 @@ export class JovoDebugger extends Plugin<JovoDebuggerConfig> {
       const createJovoFn = platform.createJovoInstance;
       platform.createJovoInstance = (app, handleRequest) => {
         const jovo = createJovoFn.call(platform, app, handleRequest);
-        // propagate initial values, might not be required, TBD
         for (const key in jovo) {
-          const isEmptyObject =
-            typeof jovo[key as keyof Jovo] === 'object' &&
-            !Array.isArray(jovo[key as keyof Jovo]) &&
-            !Object.keys(jovo[key as keyof Jovo] || {}).length;
-          const isEmptyArray =
-            Array.isArray(jovo[key as keyof Jovo]) &&
-            !((jovo[key as keyof Jovo] as unknown[]) || []).length;
-          if (
-            !jovo.hasOwnProperty(key) ||
-            this.config.ignoredProperties.includes(key) ||
-            !jovo[key as keyof Jovo] ||
-            isEmptyObject ||
-            isEmptyArray
-          ) {
+          if (!jovo.hasOwnProperty(key) || this.config.ignoredProperties.includes(key)) {
             continue;
           }
-          const payload: JovoDebuggerPayload<JovoUpdateData> = {
-            requestId: handleRequest.debuggerRequestId,
-            data: {
-              key,
-              value: jovo[key as keyof Jovo],
-              path: key,
-            },
-          };
-          this.socket?.emit(JovoDebuggerEvent.AppJovoUpdate, payload);
+          this.emitJovoUpdate(handleRequest.debuggerRequestId, {
+            key,
+            value: jovo[key as keyof Jovo],
+            path: key,
+          });
         }
         return new Proxy(jovo, this.createProxyHandler(handleRequest));
       };
@@ -198,7 +165,6 @@ export class JovoDebugger extends Plugin<JovoDebuggerConfig> {
           typeof target[key] === 'object' &&
           target[key] !== null &&
           !(target[key] instanceof Date) &&
-          // TODO: determine if this has side-effects
           !this.config.ignoredProperties.includes(key)
         ) {
           return new Proxy(
@@ -210,20 +176,16 @@ export class JovoDebugger extends Plugin<JovoDebuggerConfig> {
         }
       },
       set: (target, key: string, value: unknown): boolean => {
-        // TODO determine whether empty values should be emitted, in the initial emit, they're omitted.
         const previousValue = (target as UnknownObject)[key];
         (target as UnknownObject)[key] = value;
         // only emit changes
-        if (!isEqual(previousValue, value)) {
-          const payload: JovoDebuggerPayload<JovoUpdateData> = {
-            requestId: handleRequest.debuggerRequestId,
-            data: {
-              key,
-              value,
-              path: path ? [path, key].join('.') : key,
-            },
-          };
-          this.socket?.emit(JovoDebuggerEvent.AppJovoUpdate, payload);
+        if (!isEqual(previousValue, value) && !this.config.ignoredProperties.includes(key)) {
+          this.emitJovoUpdate(handleRequest.debuggerRequestId, {
+            key,
+            value: value === undefined ? null : value,
+            path: path ? [path, key].join('.') : key,
+            previousValue,
+          });
         }
 
         return true;
@@ -336,6 +298,14 @@ export class JovoDebugger extends Plugin<JovoDebuggerConfig> {
     };
     this.socket.emit(JovoDebuggerEvent.AppResponse, payload);
   };
+
+  private emitJovoUpdate(requestId: number | string, update: JovoUpdate): void {
+    const payload: JovoDebuggerPayload<JovoUpdate> = {
+      requestId,
+      data: update,
+    };
+    this.socket?.emit(JovoDebuggerEvent.AppJovoUpdate, payload);
+  }
 
   private async connectToWebhook() {
     const webhookId = await this.retrieveLocalWebhookId();
